@@ -14,9 +14,6 @@ SESSION = requests.session()
 USERNAME = os.environ.get('YURIFANS_EMAIL')
 PASSWORD = os.environ.get('YURIFANS_PASSWORD')
 
-# message
-msg = []
-
 # 登录 - 添加详细错误处理
 def login():
     print(f"尝试登录账号: {USERNAME}")
@@ -96,24 +93,20 @@ def check_user_info(b2_token):
             
         try:
             user_data = req.json()["user_data"]
-            global msg
-            msg += [
-                {"name": "账户信息", "value": user_data.get("name")},
-            ]
-            return True
+            return True, user_data.get("name")
         except Exception as e:
             print(f'解析用户信息失败: {str(e)}')
             print(f'完整响应: {req.text}')
-            return False
+            return False, ""
     except Exception as e:
         print(f'请求用户信息异常: {str(e)}')
-        return False
+        return False, ""
 
 # 查询积分
 def query_credit(b2_token):
     if not b2_token:
         print('未提供有效token，跳过积分查询')
-        return True
+        return True, 0, 0  # 需要签到, 当前积分, 今日积分
         
     url = "https://yuri.website/wp-json/b2/v1/getUserMission"
     headers = {
@@ -122,43 +115,33 @@ def query_credit(b2_token):
         "authorization": 'Bearer ' + b2_token
     }
     
-    global msg
-
     try:
         req = SESSION.post(url, headers=headers, timeout=10)
         print(f"积分查询响应状态码: {req.status_code}")
         
         if req.status_code != 200:
             print(f"积分查询失败，状态码: {req.status_code}")
-            return True
+            return True, 0, 0
             
         response_data = req.json()
         mission = response_data.get("mission", {})
         date = mission.get("date")
         my_credit = mission.get("my_credit", 0)
         
-        msg += [{"name": "当前积分", "value": my_credit}]
-        
         if not date:
-            return True
+            return True, my_credit, 0  # 需要签到
             
         credit = mission.get("credit", 0) 
-        msg += [
-            {"name": "签到信息", "value": "今日已经签到"},
-            {"name": "今日获取积分", "value": credit}
-        ]
-        return False
+        return False, my_credit, credit  # 不需要签到
     except Exception as e:
         print(f"积分查询异常: {str(e)}")
-        return True
+        return True, 0, 0
 
 # 签到
 def check_in(b2_token):
     if not b2_token:
         print('未提供有效token，跳过签到')
-        global msg
-        msg += [{"name": "签到信息", "value": "未登录，签到失败"}]
-        return False
+        return False, "未登录，签到失败", 0
         
     headers = {
         "accept": "application/json, text/plain, */*",
@@ -172,37 +155,24 @@ def check_in(b2_token):
         print(f"签到响应状态码: {req.status_code}")
         print(f"签到响应内容: {req.text[:200]}...")
         
-        global msg
-        
         if req.status_code != 200:
-            msg += [{"name": "签到信息", "value": f"签到失败，状态码: {req.status_code}"}]
-            return False
+            return False, f"签到失败，状态码: {req.status_code}", 0
             
         try:
             data = req.json()
             if "mission" in data:
                 mission_data = data["mission"]
                 credit = mission_data.get("credit", "未知")
-                msg += [
-                    {"name": "签到信息", "value": "签到成功"},
-                    {"name": "今日获取积分", "value": credit},
-                ]
-                return True
+                return True, "签到成功", credit
             else:
                 # 处理已签到的情况
-                msg += [
-                    {"name": "签到信息", "value": "今日已签到"},
-                    {"name": "今日获取积分", "value": req.text}
-                ]
-                return True
+                return True, "今日已签到", req.text
         except Exception as e:
             print(f"解析签到响应失败: {str(e)}")
-            msg += [{"name": "签到信息", "value": "签到响应解析失败"}]
-            return False
+            return False, "签到响应解析失败", 0
     except Exception as e:
         print(f"签到请求异常: {str(e)}")
-        msg += [{"name": "签到信息", "value": "签到请求异常"}]
-        return False
+        return False, "签到请求异常", 0
 
 # 登出 - 添加空值检查
 def logout(b2_token):
@@ -226,11 +196,9 @@ def logout(b2_token):
     except Exception as e:
         print(f"退出登录异常: {str(e)}")
 
-# 主函数 - 添加全面错误处理
+# 主函数 - 重构以解决全局变量问题
 def main():
-    global msg
-    msg = []  # 重置消息
-    
+    messages = []
     print("=" * 30 + " Yurifans 签到开始 " + "=" * 30)
     
     try:
@@ -239,34 +207,45 @@ def main():
         sleep(2)
         
         if not b2_token:
-            msg.append({"name": "签到状态", "value": "登录失败，无法签到"})
-            return format_message()
+            messages.append({"name": "签到状态", "value": "登录失败，无法签到"})
+            return format_message(messages)
         
         # 获取用户信息
-        user_info_success = check_user_info(b2_token)
+        user_info_success, username = check_user_info(b2_token)
+        if user_info_success and username:
+            messages.append({"name": "账户信息", "value": username})
+        else:
+            messages.append({"name": "账户信息", "value": "获取失败"})
         
         # 查询积分和签到
         if user_info_success:
-            need_checkin = query_credit(b2_token)
+            need_checkin, my_credit, today_credit = query_credit(b2_token)
+            messages.append({"name": "当前积分", "value": my_credit})
+            
             if need_checkin:
-                check_in(b2_token)
+                checkin_success, checkin_msg, credit_earned = check_in(b2_token)
+                messages.append({"name": "签到信息", "value": checkin_msg})
+                if credit_earned:
+                    messages.append({"name": "今日获取积分", "value": credit_earned})
+            else:
+                messages.append({"name": "签到信息", "value": "今日已签到"})
+                messages.append({"name": "今日获取积分", "value": today_credit})
         
         # 登出
         logout(b2_token)
         
-        return format_message()
+        return format_message(messages)
         
     except Exception as e:
         print(f"主流程异常: {str(e)}")
-        msg.append({"name": "签到状态", "value": f"程序异常: {str(e)}"})
-        return format_message()
+        messages.append({"name": "签到状态", "value": f"程序异常: {str(e)}"})
+        return format_message(messages)
     finally:
         print("=" * 30 + " Yurifans 签到结束 " + "=" * 30)
 
 # 格式化消息
-def format_message():
-    global msg
-    return "\n".join([f"{one.get('name')}: {one.get('value')}" for one in msg])
+def format_message(messages):
+    return "\n".join([f"{one.get('name')}: {one.get('value')}" for one in messages])
 
 
 if __name__ == '__main__':
